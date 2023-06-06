@@ -197,7 +197,7 @@ impl Gui {
     pub fn draw_on_subpass_image(
         &mut self,
         image_dimensions: [u32; 2],
-    ) -> SecondaryAutoCommandBuffer {
+    ) -> Arc<SecondaryAutoCommandBuffer> {
         if self.renderer.has_renderpass() {
             panic!(
                 "Gui integration has been created with its own render pass, use `draw_on_image` \

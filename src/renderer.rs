@@ -45,13 +45,16 @@ use vulkano::{
             input_assembly::InputAssemblyState,
             multisample::MultisampleState,
             rasterization::{CullMode as CullModeEnum, RasterizationState},
-            vertex_input::Vertex,
+            vertex_input::{Vertex, VertexDefinition},
             viewport::{Scissor, Viewport, ViewportState},
+            GraphicsPipelineCreateInfo,
         },
-        GraphicsPipeline, Pipeline, PipelineBindPoint,
+        layout::PipelineDescriptorSetLayoutCreateInfo,
+        GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
     sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode},
+    shader::PipelineShaderStageCreateInfo,
     sync::GpuFuture,
     DeviceSize,
 };
@@ -234,8 +237,14 @@ impl Renderer {
     }
 
     fn create_pipeline(gfx_queue: Arc<Queue>, subpass: Subpass) -> Arc<GraphicsPipeline> {
-        let vs = vs::load(gfx_queue.device().clone()).expect("failed to create shader module");
-        let fs = fs::load(gfx_queue.device().clone()).expect("failed to create shader module");
+        let vs = vs::load(gfx_queue.device().clone())
+            .expect("failed to create shader module")
+            .entry_point("main")
+            .unwrap();
+        let fs = fs::load(gfx_queue.device().clone())
+            .expect("failed to create shader module")
+            .entry_point("main")
+            .unwrap();
 
         let mut blend = AttachmentBlend::alpha();
         blend.color_source = BlendFactor::One;
@@ -243,21 +252,40 @@ impl Renderer {
         blend.alpha_destination = BlendFactor::One;
         let blend_state = ColorBlendState::new(1).blend(blend);
 
-        GraphicsPipeline::start()
-            .vertex_input_state(EguiVertex::per_vertex())
-            .vertex_shader(vs.entry_point("main").unwrap(), ())
-            .input_assembly_state(InputAssemblyState::new())
-            .fragment_shader(fs.entry_point("main").unwrap(), ())
-            .viewport_state(ViewportState::viewport_dynamic_scissor_dynamic(1))
-            .color_blend_state(blend_state)
-            .rasterization_state(RasterizationState::new().cull_mode(CullModeEnum::None))
-            .multisample_state(MultisampleState {
-                rasterization_samples: subpass.num_samples().unwrap_or(SampleCount::Sample1),
-                ..Default::default()
-            })
-            .render_pass(subpass)
-            .build(gfx_queue.device().clone())
-            .unwrap()
+        let vertex_input_state =
+            EguiVertex::per_vertex().definition(&vs.info().input_interface).unwrap();
+        let stages = [
+            PipelineShaderStageCreateInfo::entry_point(vs),
+            PipelineShaderStageCreateInfo::entry_point(fs),
+        ];
+
+        let layout = PipelineLayout::new(
+            gfx_queue.device().clone(),
+            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+                .into_pipeline_layout_create_info(gfx_queue.device().clone())
+                .unwrap(),
+        )
+        .unwrap();
+
+        GraphicsPipeline::new(
+            gfx_queue.device().clone(),
+            None,
+            GraphicsPipelineCreateInfo {
+                stages: stages.iter().cloned().collect(),
+                vertex_input_state: Some(vertex_input_state),
+                input_assembly_state: Some(InputAssemblyState::new()),
+                viewport_state: Some(ViewportState::viewport_dynamic_scissor_dynamic(1)),
+                rasterization_state: Some(RasterizationState::new().cull_mode(CullModeEnum::None)),
+                multisample_state: Some(MultisampleState {
+                    rasterization_samples: subpass.num_samples().unwrap_or(SampleCount::Sample1),
+                    ..Default::default()
+                }),
+                color_blend_state: Some(blend_state),
+                subpass: Some(subpass.into()),
+                ..GraphicsPipelineCreateInfo::layout(layout)
+            },
+        )
+        .unwrap()
     }
 
     /// Creates a descriptor set for images
@@ -268,7 +296,8 @@ impl Renderer {
     ) -> Arc<PersistentDescriptorSet> {
         PersistentDescriptorSet::new(&self.allocators.descriptor_set, layout.clone(), [
             WriteDescriptorSet::image_view_sampler(0, image, self.sampler.clone()),
-        ])
+        ],
+        [])
         .unwrap()
     }
 
@@ -545,7 +574,7 @@ impl Renderer {
         textures_delta: &TexturesDelta,
         scale_factor: f32,
         framebuffer_dimensions: [u32; 2],
-    ) -> SecondaryAutoCommandBuffer {
+    ) -> Arc<SecondaryAutoCommandBuffer> {
         for (id, image_delta) in &textures_delta.set {
             self.update_texture(*id, image_delta);
         }
@@ -596,15 +625,19 @@ impl Renderer {
                     let desc_set = self.texture_desc_sets.get(&mesh.texture_id).unwrap().clone();
                     builder
                         .bind_pipeline_graphics(self.pipeline.clone())
-                        .set_viewport(0, vec![Viewport {
-                            origin: [0.0, 0.0],
-                            dimensions: [
-                                framebuffer_dimensions[0] as f32,
-                                framebuffer_dimensions[1] as f32,
-                            ],
-                            depth_range: 0.0..1.0,
-                        }])
-                        .set_scissor(0, scissors)
+                        .set_viewport(
+                            0,
+                            vec![Viewport {
+                                origin: [0.0, 0.0],
+                                dimensions: [
+                                    framebuffer_dimensions[0] as f32,
+                                    framebuffer_dimensions[1] as f32,
+                                ],
+                                depth_range: 0.0..1.0,
+                            }]
+                            .into(),
+                        )
+                        .set_scissor(0, scissors.into())
                         .bind_descriptor_sets(
                             PipelineBindPoint::Graphics,
                             self.pipeline.layout().clone(),
@@ -636,12 +669,16 @@ impl Renderer {
                         )];
 
                         builder
-                            .set_viewport(0, vec![Viewport {
-                                origin: [rect_min_x, rect_min_y],
-                                dimensions: [rect_max_x - rect_min_x, rect_max_y - rect_min_y],
-                                depth_range: 0.0..1.0,
-                            }])
-                            .set_scissor(0, scissors);
+                            .set_viewport(
+                                0,
+                                vec![Viewport {
+                                    origin: [rect_min_x, rect_min_y],
+                                    dimensions: [rect_max_x - rect_min_x, rect_max_y - rect_min_y],
+                                    depth_range: 0.0..1.0,
+                                }]
+                                .into(),
+                            )
+                            .set_scissor(0, scissors.into());
 
                         let info = egui::PaintCallbackInfo {
                             viewport: callback.rect,
