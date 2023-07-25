@@ -55,11 +55,18 @@ pub struct GuiConfig {
     /// Multisample count. Defaults to 1. If you use more than 1, you'll have to ensure your
     /// pipeline and target image matches that.
     pub samples: SampleCount,
+    /// Format for depth attachment. May be `None`, in which case no depth attachment will be used.
+    pub depth_format: Option<Format>,
 }
 
 impl Default for GuiConfig {
     fn default() -> Self {
-        GuiConfig { preferred_format: None, is_overlay: false, samples: SampleCount::Sample1 }
+        GuiConfig {
+            preferred_format: None,
+            is_overlay: false,
+            samples: SampleCount::Sample1,
+            depth_format: None,
+        }
     }
 }
 
@@ -88,8 +95,13 @@ impl Gui {
         let format = get_surface_image_format(&surface, config.preferred_format, &gfx_queue);
         let max_texture_side =
             gfx_queue.device().physical_device().properties().max_image_array_layers as usize;
-        let renderer =
-            Renderer::new_with_render_pass(gfx_queue, format, config.is_overlay, config.samples);
+        let renderer = Renderer::new_with_render_pass(
+            gfx_queue,
+            format,
+            config.is_overlay,
+            config.samples,
+            config.depth_format,
+        );
         let mut egui_winit = egui_winit::State::new(event_loop);
         egui_winit.set_max_texture_side(max_texture_side);
         egui_winit.set_pixels_per_point(surface_window(&surface).scale_factor() as f32);
