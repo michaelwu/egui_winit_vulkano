@@ -8,7 +8,7 @@
 // according to those terms.
 
 use std::{
-    convert::{TryFrom, TryInto},
+    convert::TryInto,
     sync::Arc,
 };
 
@@ -62,7 +62,11 @@ use vulkano::{
         DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo,
     },
-    render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
+    render_pass::{
+        AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
+        Framebuffer, FramebufferCreateInfo, RenderPass, RenderPassCreateInfo, Subpass,
+        SubpassDescription,
+    },
     sync::GpuFuture,
     DeviceSize, NonZeroDeviceSize,
 };
@@ -96,6 +100,7 @@ pub struct Renderer {
 
     #[allow(unused)]
     format: vulkano::format::Format,
+    depth_format: Option<vulkano::format::Format>,
     font_sampler: Arc<Sampler>,
     // May be R8G8_UNORM or R8G8B8A8_SRGB
     font_format: Format,
@@ -116,7 +121,7 @@ impl Renderer {
         final_output_format: Format,
         subpass: Subpass,
     ) -> Renderer {
-        Self::new_internal(gfx_queue, final_output_format, subpass, None, false)
+        Self::new_internal(gfx_queue, final_output_format, subpass, None, false, None)
     }
 
     /// Creates a new [Renderer] which is responsible for rendering egui with its own renderpass
@@ -126,43 +131,64 @@ impl Renderer {
         final_output_format: Format,
         is_overlay: bool,
         samples: SampleCount,
+        depth_format: Option<Format>,
     ) -> Renderer {
         // Create Gui render pass with just depth and final color
-        let render_pass = if is_overlay {
-            vulkano::single_pass_renderpass!(gfx_queue.device().clone(),
-                attachments: {
-                    final_color: {
-                        format: final_output_format,
-                        samples: samples,
-                        load_op: Load,
-                        store_op: Store,
-                    }
-                },
-                pass: {
-                        color: [final_color],
-                        depth_stencil: {}
-                }
-            )
-            .unwrap()
-        } else {
-            vulkano::single_pass_renderpass!(gfx_queue.device().clone(),
-                attachments: {
-                    final_color: {
-                        format: final_output_format,
-                        samples: samples,
-                        load_op: Clear,
-                        store_op: Store,
-                    }
-                },
-                pass: {
-                        color: [final_color],
-                        depth_stencil: {}
-                }
-            )
-            .unwrap()
-        };
+        let load_op = if is_overlay { AttachmentLoadOp::Load } else { AttachmentLoadOp::Clear };
+        let mut attachments = vec![AttachmentDescription {
+            format: final_output_format,
+            samples,
+            load_op,
+            store_op: AttachmentStoreOp::Store,
+            stencil_load_op: Some(load_op),
+            stencil_store_op: Some(AttachmentStoreOp::Store),
+            initial_layout: ImageLayout::ColorAttachmentOptimal,
+            final_layout: ImageLayout::ColorAttachmentOptimal,
+            ..Default::default()
+        }];
+        if let Some(depth_format) = depth_format {
+            attachments.push(AttachmentDescription {
+                format: depth_format,
+                samples,
+                load_op,
+                store_op: AttachmentStoreOp::DontCare,
+                stencil_load_op: Some(load_op),
+                stencil_store_op: Some(AttachmentStoreOp::DontCare),
+                initial_layout: ImageLayout::DepthStencilAttachmentOptimal,
+                final_layout: ImageLayout::DepthStencilAttachmentOptimal,
+                ..Default::default()
+            });
+        }
+        let color_attachments = vec![Some(AttachmentReference {
+            attachment: 0,
+            layout: ImageLayout::ColorAttachmentOptimal,
+            ..Default::default()
+        })];
+        let depth_stencil_attachment = depth_format.map(|_| AttachmentReference {
+            attachment: 1,
+            layout: ImageLayout::DepthStencilAttachmentOptimal,
+            ..Default::default()
+        });
+        let subpasses = vec![SubpassDescription {
+            color_attachments,
+            depth_stencil_attachment,
+            ..Default::default()
+        }];
+        let render_pass = RenderPass::new(
+            gfx_queue.device().clone(),
+            RenderPassCreateInfo { attachments, subpasses, ..Default::default() },
+        )
+        .unwrap();
+
         let subpass = Subpass::from(render_pass.clone(), 0).unwrap();
-        Self::new_internal(gfx_queue, final_output_format, subpass, Some(render_pass), is_overlay)
+        Self::new_internal(
+            gfx_queue,
+            final_output_format,
+            subpass,
+            Some(render_pass),
+            is_overlay,
+            depth_format,
+        )
     }
 
     fn new_internal(
@@ -171,6 +197,7 @@ impl Renderer {
         subpass: Subpass,
         render_pass: Option<Arc<RenderPass>>,
         is_overlay: bool,
+        depth_format: Option<Format>,
     ) -> Renderer {
         let output_in_linear_colorspace =
             // final_output_format.type_color().unwrap() == NumericType::SRGB;
@@ -197,6 +224,7 @@ impl Renderer {
         Renderer {
             gfx_queue,
             format: final_output_format,
+            depth_format,
             render_pass,
             vertex_index_buffer_pool,
             pipeline,
@@ -252,12 +280,18 @@ impl Renderer {
         )
         .unwrap();
 
+        let depth_stencil_state = if subpass.subpass_desc().depth_stencil_attachment.is_some() {
+            Some(vulkano::pipeline::graphics::depth_stencil::DepthStencilState::default())
+        } else {
+            None
+        };
         GraphicsPipeline::new(gfx_queue.device().clone(), None, GraphicsPipelineCreateInfo {
             stages: stages.into_iter().collect(),
             vertex_input_state,
             input_assembly_state: Some(InputAssemblyState::default()),
             viewport_state: Some(ViewportState::default()),
             rasterization_state: Some(RasterizationState::default()),
+            depth_stencil_state,
             multisample_state: Some(MultisampleState {
                 rasterization_samples: subpass.num_samples().unwrap_or(SampleCount::Sample1),
                 ..Default::default()
@@ -593,6 +627,26 @@ impl Renderer {
     ) -> (AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>, [u32; 2]) {
         // Get dimensions
         let img_dims = final_image.image().extent();
+        let mut attachments = vec![final_image];
+        if let Some(depth_format) = self.depth_format {
+            let depth_buffer = ImageView::new_default(
+                Image::new(
+                    self.allocators.memory.clone(),
+                    ImageCreateInfo {
+                        image_type: ImageType::Dim2d,
+                        format: depth_format,
+                        extent: img_dims,
+                        usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT
+                            | ImageUsage::TRANSIENT_ATTACHMENT,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            attachments.push(depth_buffer);
+        }
         // Create framebuffer (must be in same order as render pass description in `new`
         let framebuffer = Framebuffer::new(
             self.render_pass
@@ -602,7 +656,7 @@ impl Renderer {
                      instead",
                 )
                 .clone(),
-            FramebufferCreateInfo { attachments: vec![final_image], ..Default::default() },
+            FramebufferCreateInfo { attachments, ..Default::default() },
         )
         .unwrap();
         let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
@@ -612,10 +666,14 @@ impl Renderer {
         )
         .unwrap();
         // Add clear values here for attachments and begin render pass
+        let mut clear_values = vec![if !self.is_overlay { Some([0.0; 4].into()) } else { None }];
+        if self.depth_format.is_some() {
+            clear_values.push(Some(vulkano::format::ClearValue::Depth(1.)));
+        }
         command_buffer_builder
             .begin_render_pass(
                 RenderPassBeginInfo {
-                    clear_values: vec![if !self.is_overlay { Some([0.0; 4].into()) } else { None }],
+                    clear_values,
                     ..RenderPassBeginInfo::framebuffer(framebuffer)
                 },
                 SubpassBeginInfo {

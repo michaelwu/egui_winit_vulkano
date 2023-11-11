@@ -40,6 +40,8 @@ pub struct GuiConfig {
     /// Multisample count. Defaults to 1. If you use more than 1, you'll have to ensure your
     /// pipeline and target image matches that.
     pub samples: SampleCount,
+    /// Format for depth attachment. May be `None`, in which case no depth attachment will be used.
+    pub depth_format: Option<Format>,
 }
 
 impl Default for GuiConfig {
@@ -48,6 +50,7 @@ impl Default for GuiConfig {
             allow_srgb_render_target: false,
             is_overlay: false,
             samples: SampleCount::Sample1,
+            depth_format: None,
         }
     }
 }
@@ -94,6 +97,7 @@ impl Gui {
             output_format,
             config.is_overlay,
             config.samples,
+            config.depth_format,
         );
         Self::new_internal(event_loop, surface, renderer)
     }
